@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini-BASIC — web IDE (like basic-256)</title>
+  <style>
+    :root{--bg:#0f1724;--panel:#0b1220;--accent:#16a34a;--muted:#9ca3af}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    body{background:linear-gradient(180deg,#071024 0%,#07111a 100%);color:#e6eef8}
+    .app{display:grid;grid-template-columns:1fr 420px;gap:14px;height:100vh;padding:14px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;padding:12px;box-shadow:0 6px 20px rgba(2,6,23,.6);}
+    header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+    header h1{font-size:18px;margin:0}
+    .editor{height:calc(100vh - 120px);display:flex;flex-direction:column}
+    textarea{flex:1;width:100%;resize:none;background:#071427;color:#e6eef8;border:1px solid rgba(255,255,255,0.04);padding:12px;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', monospace;font-size:14px;line-height:1.5}
+    .toolbar{display:flex;gap:8px;margin-top:8px}
+    button{background:var(--panel);border:1px solid rgba(255,255,255,0.03);color:var(--accent);padding:8px 10px;border-radius:8px;cursor:pointer}
+    button.secondary{color:var(--muted);border-style:dashed}
+    .right{display:flex;flex-direction:column}
+    .console{height:50%;overflow:auto;background:#031120;padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);font-family:ui-monospace,monospace}
+    .program-list{height:50%;overflow:auto;margin-top:12px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent)}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    .muted{color:var(--muted);font-size:13px}
+    input[type=file]{display:none}
+    footer{margin-top:8px;font-size:12px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <header>
+        <h1>Mini-BASIC — Web IDE</h1>
+        <div class="muted">A small BASIC-like environment: PRINT, LET, INPUT, GOTO, IF...THEN, REM, END</div>
+      </header>
+      <div class="editor">
+        <textarea id="editor">10 REM Sample program
+20 LET A = 1
+30 PRINT "Enter a number:"
+40 INPUT N
+50 PRINT "Counting to";N
+60 LET I = 1
+70 IF I > N THEN 120
+80 PRINT I
+90 LET I = I + 1
+100 GOTO 70
+110 END
+120 PRINT "Done"
+</textarea>
+        <div class="toolbar">
+          <div class="controls">
+            <button id="runBtn">Run ▶</button>
+            <button id="stopBtn" class="secondary">Stop ■</button>
+            <button id="stepBtn" class="secondary">Step ⏭</button>
+            <button id="clearConsole" class="secondary">Clear Console</button>
+            <button id="saveLocal">Save</button>
+            <button id="loadLocal" class="secondary">Load</button>
+            <label for="fileLoad" class="secondary" style="padding:8px 10px;border-radius:8px;cursor:pointer">Import</label>
+            <input id="fileLoad" type="file" accept="text/*">
+            <button id="download">Download .bas</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card right">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><strong>Console</strong></div>
+        <div class="muted">Output and INPUT prompts appear here</div>
+      </div>
+      <div id="console" class="console"></div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+        <div><strong>Program Lines</strong></div>
+        <div class="muted">Jump to line by clicking</div>
+      </div>
+      <div id="programList" class="program-list"></div>
+
+      <footer>
+        Tips: Save often. This mini-interpreter supports PRINT, LET, INPUT, GOTO, IF ... THEN (simple comparisons), REM, END. Ask me to add FOR/NEXT, GOSUB, arrays.
+      </footer>
+    </div>
+  </div>
+
+  <script>
+  // --- Simple BASIC-like interpreter ---
+  const editor = document.getElementById('editor');
+  const consoleEl = document.getElementById('console');
+  const programListEl = document.getElementById('programList');
+  const runBtn = document.getElementById('runBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const stepBtn = document.getElementById('stepBtn');
+  const clearConsole = document.getElementById('clearConsole');
+  const saveLocal = document.getElementById('saveLocal');
+  const loadLocal = document.getElementById('loadLocal');
+  const fileLoad = document.getElementById('fileLoad');
+  const downloadBtn = document.getElementById('download');
+
+  let program = []; // array of {ln, text}
+  let lineIndexByNumber = {}; // map number -> index
+  let ip = 0; // instruction pointer (index in program)
+  let running = false;
+  let variables = {}; // simple variable store (all numbers or strings)
+
+  function logToConsole(...parts){
+    const html = parts.map(p => escapeHtml(String(p))).join(' ');
+    consoleEl.innerHTML += html + '<br>';
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function parseProgram(text){
+    const lines = text.replace(/\r/g,'').split('\n');
+    const pr = [];
+    for(let raw of lines){
+      if(!raw.trim()) continue;
+      // allow optional leading line number
+      const m = raw.match(/^\s*(\d+)\s+(.*)$/);
+      if(m){ pr.push({ln: +m[1], text: m[2]}); }
+      else { // if no line number, append with auto-incremented high number
+        const next = pr.length? pr[pr.length-1].ln + 10 : 10;
+        pr.push({ln: next, text: raw.trim()});
+      }
+    }
+    pr.sort((a,b)=>a.ln-b.ln);
+    lineIndexByNumber = {};
+    pr.forEach((p,i)=> lineIndexByNumber[p.ln]=i);
+    program = pr;
+    renderProgramList();
+  }
+
+  function renderProgramList(){
+    programListEl.innerHTML = '';
+    program.forEach((p,i)=>{
+      const d = document.createElement('div');
+      d.style.padding='6px'; d.style.borderBottom='1px solid rgba(255,255,255,0.02)'; d.style.cursor='pointer';
+      d.innerHTML = '<strong>'+p.ln+'</strong> — '+escapeHtml(p.text);
+      d.addEventListener('click', ()=>{ ip = i; highlightLineInEditor(p.ln); logToConsole('IP set to line', p.ln); });
+      programListEl.appendChild(d);
+    });
+  }
+
+  function highlightLineInEditor(ln){
+    // naive: find line starting with that number
+    const re = new RegExp('^\\s*'+ln+'\\b','m');
+    const m = editor.value.match(re);
+    if(!m) return;
+    const idx = editor.value.indexOf(m[0]);
+    editor.focus(); editor.setSelectionRange(idx, idx + String(ln).length + 1);
+  }
+
+  function evalExpression(expr){
+    // Support numbers, variables, + - * /, parentheses, strings in quotes
+    expr = expr.trim();
+    // string literal
+    if(/^".*"$/.test(expr)) return expr.slice(1,-1);
+    // replace variables (names: letters and digits, starting letter)
+    expr = expr.replace(/\b([A-Za-z][A-Za-z0-9_]*)\b/g, (m,name)=>{
+      if(Object.prototype.hasOwnProperty.call(variables,name)) return '('+JSON.stringify(variables[name])+')';
+      return '0';
+    });
+    // now safe-eval arithmetic only
+    try{
+      // prevent access to window by forbidding letters
+      if(/[A-Za-z$_]/.test(expr)) throw 'Invalid expression';
+      // eslint-disable-next-line no-new-func
+      const v = Function('return ('+expr+')')();
+      return (typeof v === 'number' && !isNaN(v))? v : v;
+    }catch(e){
+      return 0;
+    }
+  }
+
+  function findLineIndexByNumber(n){ return lineIndexByNumber[n] ?? -1; }
+
+  async function runOneStep(){
+    if(ip < 0 || ip >= program.length){ running = false; return false; }
+    const stmt = program[ip].text.trim();
+    // basic parsing
+    // REM
+    if(/^REM\b/i.test(stmt)){ ip++; return true; }
+    // END
+    if(/^END\b/i.test(stmt)){ running = false; logToConsole('Program ended.'); return false; }
+    // PRINT
+    let m = stmt.match(/^PRINT\s+(.*)$/i);
+    if(m){
+      // support using semicolon or comma to concatenate
+      const parts = m[1].split(/;|,/).map(s=>s.trim());
+      const out = parts.map(p=>{
+        if(/^".*"$/.test(p)) return p.slice(1,-1);
+        const v = evalExpression(p); return v;
+      }).join(' ');
+      logToConsole(out);
+      ip++; return true;
+    }
+    // LET var = expr  or var = expr
+    m = stmt.match(/^(?:LET\s+)?([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)$/i);
+    if(m){
+      const name = m[1]; const val = evalExpression(m[2]); variables[name] = val; ip++; return true;
+    }
+    // INPUT var
+    m = stmt.match(/^INPUT\s+([A-Za-z][A-Za-z0-9_]*)$/i);
+    if(m){
+      const name = m[1];
+      // show prompt and wait
+      const user = await new Promise(res => {
+        const v = prompt('INPUT '+name+':'); res(v===null? '': (isFinite(v)? Number(v) : v));
+      });
+      variables[name] = user; ip++; return true;
+    }
+    // GOTO lineno
+    m = stmt.match(/^GOTO\s+(\d+)$/i);
+    if(m){
+      const ln = +m[1];
+      const idx = findLineIndexByNumber(ln);
+      if(idx>=0) { ip = idx; return true; } else { logToConsole('Error: line',ln,'not found'); running=false; return false; }
+    }
+    // IF a < b THEN lineno  (supports =,<,>,<=,>=,<> or !=)
+    m = stmt.match(/^IF\s+(.*?)\s*(=|<>|!=|<=|>=|<|>)\s*(.*?)\s+THEN\s+(\d+)$/i);
+    if(m){
+      const left = evalExpression(m[1]);
+      const op = m[2];
+      const right = evalExpression(m[3]);
+      const ln = +m[4];
+      let cond = false;
+      if(op==='=' ) cond = left == right;
+      if(op==='!=' || op==='<>') cond = left != right;
+      if(op==='<') cond = left < right;
+      if(op==='>') cond = left > right;
+      if(op==='<=') cond = left <= right;
+      if(op==='>=') cond = left >= right;
+      if(cond){ const idx = findLineIndexByNumber(ln); if(idx>=0){ ip = idx; return true; } else { logToConsole('Error: line',ln,'not found'); running=false; return false; } }
+      ip++; return true;
+    }
+
+    // Unknown statement
+    logToConsole('Unknown statement at', program[ip].ln+':', stmt);
+    running = false; return false;
+  }
+
+  async function runProgram(){
+    parseProgram(editor.value);
+    variables = {};
+    ip = 0; running = true;
+    logToConsole('--- Program started ---');
+    while(running){
+      // safety: prevent infinite tight loop from locking UI
+      const ok = await runOneStep();
+      await new Promise(r=>setTimeout(r, 0));
+      if(!ok) break;
+    }
+  }
+
+  // Step one statement
+  async function stepProgram(){
+    if(!program.length) parseProgram(editor.value);
+    running = false;
+    if(ip >= program.length) ip = 0;
+    await runOneStep();
+  }
+
+  // UI wiring
+  runBtn.addEventListener('click', ()=>{ runProgram(); });
+  stopBtn.addEventListener('click', ()=>{ running = false; logToConsole('Execution stopped by user.'); });
+  stepBtn.addEventListener('click', ()=>{ stepProgram(); });
+  clearConsole.addEventListener('click', ()=>{ consoleEl.innerHTML=''; });
+
+  saveLocal.addEventListener('click', ()=>{ localStorage.setItem('mini_basic_program', editor.value); logToConsole('Saved to localStorage.'); });
+  loadLocal.addEventListener('click', ()=>{ const v = localStorage.getItem('mini_basic_program'); if(v){ editor.value = v; parseProgram(v); logToConsole('Loaded from localStorage.'); } else logToConsole('No saved program found.'); });
+
+  fileLoad.addEventListener('change', (e)=>{
+    const f = e.target.files[0]; if(!f) return; const reader = new FileReader();
+    reader.onload = ()=>{ editor.value = reader.result; parseProgram(editor.value); logToConsole('Imported file:', f.name); };
+    reader.readAsText(f);
+  });
+
+  downloadBtn.addEventListener('click', ()=>{
+    const blob = new Blob([editor.value], {type:'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'program.bas'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  });
+
+  // parse initial program
+  parseProgram(editor.value);
+  </script>
+</body>
+</html>
